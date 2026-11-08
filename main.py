@@ -1,6 +1,6 @@
 # language: Python 3.11+, file: main.py
 # Lokeii OSINT — Sherlock (stdout) + PhoneInfoga + Holehe
-import asyncio, html, json, os, re, subprocess, tempfile, logging
+import asyncio, html, json, os, re, subprocess, logging
 from dataclasses import dataclass, field
 
 import httpx
@@ -20,7 +20,12 @@ class Pivot:
 
 @dataclass
 class ScanState:
-    target: str; pivots: list = field(default_factory=list); seen: set = field(default_factory=set)
+    target: str
+    pivots: list = field(default_factory=list)
+    seen: set = field(default_factory=set)
+    depth: int = 0
+    history: set = field(default_factory=set)
+    
     def add(self, p: Pivot) -> bool:
         k = (p.kind, p.value.lower())
         if k in self.seen: return False
@@ -40,7 +45,6 @@ async def ck_phone(phone):
                 out.append(Pivot("таймзона", tz, "phonenumbers", .5))
     except Exception: pass
     
-    # PhoneInfoga (если установлен)
     try:
         r = await asyncio.to_thread(
             subprocess.run,
@@ -106,15 +110,15 @@ async def pivot_holehe(email):
         print(f"[holehe] error: {e}")
     return out
 
-# ---------------- DDG (для имён) ----------------
+# ---------------- DDG ----------------
 
 async def pivot_ddg(name):
     out = []
     try:
+        from bs4 import BeautifulSoup
         async with httpx.AsyncClient(timeout=TIMEOUT) as c:
             r = await c.post("https://html.duckduckgo.com/html/", data={"q": f'"{name}" site:t.me OR site:vk.com'})
             if r.status_code == 200:
-                from bs4 import BeautifulSoup
                 soup = BeautifulSoup(r.text, "lxml")
                 for a in soup.select("a.result__a")[:5]:
                     m = re.search(r"(?:t\.me|vk\.com)/([A-Za-z0-9_.]+)", a.get("href", ""))
@@ -146,7 +150,6 @@ async def run_scan(target: str, kind: str) -> ScanState:
             if isinstance(b, list):
                 for p in b: st.add(p)
 
-    # Каскадный пивот: если нашли ники или имена — ищем по ним
     while st.depth < MAX_DEPTH:
         st.depth += 1
         seeds = [p for p in st.pivots if p.kind in ("имя","ник") and p.value not in st.history]
