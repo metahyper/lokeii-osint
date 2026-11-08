@@ -1,5 +1,5 @@
 # language: Python 3.11+, file: main.py
-# Lokeii OSINT — PhoneInfoga + Naminter (local) + Sherlock
+# Lokeii OSINT — PhoneInfoga + Naminter + Sherlock
 import asyncio, html, json, os, re, subprocess, tempfile, logging
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -66,7 +66,7 @@ async def ck_phoneinfoga(phone):
         print(f"[phoneinfoga] error: {e}")
     return out
 
-# ---------------- NAMINTER (с локальным файлом) ----------------
+# ---------------- NAMINTER (с локальным файлом и выводом ошибок) ----------------
 
 async def pivot_naminter(username):
     out = []
@@ -75,23 +75,20 @@ async def pivot_naminter(username):
         
         wmn_file = Path("wmn-data.json")
         if not wmn_file.is_file():
-            print(f"[naminter] CRITICAL: {wmn_file} not found in {os.getcwd()}")
-            return out
+            return [Pivot("ОШИБКА", "wmn-data.json не найден", "naminter", 1.0)]
         
         async with Naminter() as naminter:
-            # Загружаем локальный файл вместо скачивания
             await naminter.fetch_remote_list(file_path=str(wmn_file))
-            
             results = await naminter.check_username(username, max_tasks=20)
             for res in results:
                 if res.check_status == 'found' and res.site_url:
                     out.append(Pivot("профиль", res.site_url, f"naminter/{res.site_name}", .7))
         if not out:
-            print(f"[naminter] 0 results for {username}")
-    except ImportError:
-        print("[naminter] not installed")
+            return [Pivot("ИНФО", f"Naminter: 0 результатов для {username}", "naminter", 0.5)]
+    except ImportError as e:
+        return [Pivot("ОШИБКА", f"Naminter не установлен: {e}", "naminter", 1.0)]
     except Exception as e:
-        print(f"[naminter] error: {repr(e)}")
+        return [Pivot("ОШИБКА", f"Naminter упал: {repr(e)[:100]}", "naminter", 1.0)]
     return out
 
 # ---------------- SHERLOCK ----------------
@@ -201,7 +198,7 @@ def _bar(conf: float) -> str:
     n = max(0, min(5, int(conf * 5)))
     return "█" * n + "░" * (5 - n)
 
-def _report(st: ScanState, kind: str) -> str:
+def _report(st: ScanState, kind: str) -> list[str]:
     lines = [
         f"<b>╭─ ОТЧЁТ · <code>{html.escape(st.target)}</code> ─╮</b>",
         f"  тип: <i>{kind}</i> · зацепок: <b>{len(st.pivots)}</b> · циклов: {st.depth}",
@@ -215,7 +212,11 @@ def _report(st: ScanState, kind: str) -> str:
             lines.append(f"    <code>{html.escape(p.value)[:80]}</code>")
             lines.append(f"    <i>· {html.escape(p.source)}</i>")
     lines.append("<b>╰" + "─" * (len(st.target) + 14) + "╯</b>")
-    return "\n".join(lines)
+    
+    # Разбиваем на куски по 3000 символов (лимит Telegram — 4096)
+    full_text = "\n".join(lines)
+    chunk_size = 3000
+    return [full_text[i:i+chunk_size] for i in range(0, len(full_text), chunk_size)]
 
 SCAN_FRAMES = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"]
 
@@ -248,8 +249,13 @@ async def on_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(f"Ошибка: <code>{html.escape(str(e))}</code>", parse_mode=ParseMode.HTML)
         return
     anim.cancel()
-    try: await msg.edit_text(_report(st, kind), parse_mode=ParseMode.HTML, disable_web_page_preview=True)
-    except Exception: pass
+    try:
+        chunks = _report(st, kind)
+        await msg.edit_text(chunks[0], parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+        for chunk in chunks[1:]:
+            await msg.reply_text(chunk, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+    except Exception as e:
+        print(f"[report] error: {e}")
 
 def build_application():
     app = Application.builder().token(BOT_TOKEN).build()
