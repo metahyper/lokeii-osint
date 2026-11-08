@@ -10,6 +10,9 @@ from telegram import Update
 from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
+# Включаем логирование, чтобы видеть ошибки в Railway
+logging.basicConfig(level=logging.INFO)
+
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 MAX_DEPTH = 4
 TIMEOUT = 20.0
@@ -73,43 +76,34 @@ async def ck_library_of_leaks(query):
 async def pivot_maigret(username):
     out = []
     try:
-        # Используем асинхронную обертку для вызова Maigret API в отдельном потоке
-        def run_maigret():
-            try:
-                from maigret.maigret import search
-                from maigret.sites import MaigretDatabase
-                import logging
-                
-                # Загружаем базу сайтов
-                db = MaigretDatabase().load_from_path("maigret/resources/data.json")
-                sites = db.ranked_sites_dict(top=50)
-                
-                # Запускаем поиск
-                results = asyncio.run(search(
-                    username=username,
-                    site_dict=sites,
-                    logger=logging.getLogger("maigret"),
-                    timeout=10,
-                    is_parsing_enabled=False,
-                ))
-                
-                res_list = []
-                for site_name, result in results.items():
-                    if result.get("status") and result["status"].is_found():
-                        url = result.get("url_user", "")
-                        if url:
-                            res_list.append(Pivot("профиль", url, f"maigret/{site_name}", .7))
-                return res_list
-            except Exception as e:
-                print(f"[maigret] inner error: {e}")
-                return []
-
-        out = await asyncio.to_thread(run_maigret)
+        import maigret
+        from maigret.sites import MaigretDatabase
+        
+        # Загружаем базу сайтов.
+        db = MaigretDatabase().load_from_path("maigret/resources/data.json")
+        sites = db.ranked_sites_dict(top=50)
+        
+        # Вызываем напрямую, так как мы уже в асинхронной функции
+        results = await maigret.search(
+            username=username,
+            site_dict=sites,
+            timeout=15,
+            logger=logging.getLogger("maigret"),
+            id_type='username',
+        )
+        
+        for site_name, info in results.items():
+            # Проверяем статус через QueryStatus
+            if info.get('status') and info['status'].status.name == 'CLAIMED':
+                url = info.get('url_user', '')
+                if url:
+                    out.append(Pivot("профиль", url, f"maigret/{site_name}", .7))
+        
         if not out:
-            print(f"[maigret] API returned 0 results for {username}")
+            print(f"[maigret] 0 results for {username}")
             
     except Exception as e:
-        print(f"[maigret] outer error: {e}")
+        print(f"[maigret] CRITICAL ERROR: {repr(e)}")
     return out
 
 async def pivot_sherlock_filtered(username):
