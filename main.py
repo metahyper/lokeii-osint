@@ -1,5 +1,5 @@
 # language: Python 3.11+, file: main.py
-# Lokeii OSINT — PhoneInfoga + Naminter + Sherlock
+# Lokeii OSINT — PhoneInfoga + Naminter (local data) + Sherlock
 import asyncio, html, json, os, re, subprocess, tempfile, logging
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -66,24 +66,26 @@ async def ck_phoneinfoga(phone):
         print(f"[phoneinfoga] error: {e}")
     return out
 
-# ---------------- NAMINTER (с передачей клиента) ----------------
+# ---------------- NAMINTER (локальные данные в конструктор) ----------------
 
 async def pivot_naminter(username):
     out = []
     try:
         from naminter import Naminter
         from naminter.core.network import CurlCFFISession
-        from pathlib import Path
         
         wmn_file = Path("wmn-data.json")
         if not wmn_file.is_file():
             return [Pivot("ОШИБКА", "wmn-data.json не найден", "naminter", 1.0)]
         
-        # Создаём HTTP-клиент, который требует новая версия Naminter
+        # Читаем локальный файл с данными
+        with open(wmn_file, "r", encoding="utf-8") as f:
+            wmn_data = json.load(f)
+        
+        # Передаём данные напрямую в конструктор, минуя fetch_remote_list
         http_client = CurlCFFISession(timeout=10)
         
-        async with Naminter(http_client=http_client) as naminter:
-            await naminter.fetch_remote_list(file_path=str(wmn_file))
+        async with Naminter(http_client=http_client, data=wmn_data) as naminter:
             results = await naminter.check_username(username, max_tasks=20)
             for res in results:
                 if res.check_status == 'found' and res.site_url:
