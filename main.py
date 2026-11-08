@@ -1,5 +1,5 @@
 # language: Python 3.11+, file: main.py
-# Lokeii OSINT — PhoneInfoga + Naminter (local data) + Sherlock
+# Lokeii OSINT — PhoneInfoga + Naminter (enumerate) + Sherlock
 import asyncio, html, json, os, re, subprocess, tempfile, logging
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -66,7 +66,7 @@ async def ck_phoneinfoga(phone):
         print(f"[phoneinfoga] error: {e}")
     return out
 
-# ---------------- NAMINTER (локальные данные в конструктор) ----------------
+# ---------------- NAMINTER (исправленный метод) ----------------
 
 async def pivot_naminter(username):
     out = []
@@ -78,18 +78,17 @@ async def pivot_naminter(username):
         if not wmn_file.is_file():
             return [Pivot("ОШИБКА", "wmn-data.json не найден", "naminter", 1.0)]
         
-        # Читаем локальный файл с данными
         with open(wmn_file, "r", encoding="utf-8") as f:
             wmn_data = json.load(f)
         
-        # Передаём данные напрямую в конструктор, минуя fetch_remote_list
         http_client = CurlCFFISession(timeout=10)
         
         async with Naminter(http_client=http_client, data=wmn_data) as naminter:
-            results = await naminter.check_username(username, max_tasks=20)
-            for res in results:
+            # Правильный метод в актуальной версии
+            async for res in naminter.enumerate_usernames([username]):
                 if res.check_status == 'found' and res.site_url:
                     out.append(Pivot("профиль", res.site_url, f"naminter/{res.site_name}", .7))
+        
         if not out:
             return [Pivot("ИНФО", f"Naminter: 0 результатов для {username}", "naminter", 0.5)]
     except ImportError as e:
