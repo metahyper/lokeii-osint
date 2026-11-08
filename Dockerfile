@@ -1,17 +1,17 @@
+# Используем официальный образ PhoneInfoga как базовый источник бинарника
+FROM sundowndev/phoneinfoga:latest AS phoneinfoga
+
 FROM python:3.11-slim
 
 RUN apt-get update && apt-get install -y \
     gcc \
     python3-dev \
     libffi-dev \
-    curl \
-    tar \
     && rm -rf /var/lib/apt/lists/*
 
-# Скачиваем PhoneInfoga (Go-бинарник для Linux)
-RUN curl -sSL https://github.com/sundowndev/phoneinfoga/releases/latest/download/phoneinfoga_Linux_x86_64.tar.gz \
-    | tar -xz -C /usr/local/bin/ phoneinfoga && \
-    chmod +x /usr/local/bin/phoneinfoga
+# Копируем готовый бинарник PhoneInfoga из официального образа
+COPY --from=phoneinfoga /app/phoneinfoga /usr/local/bin/phoneinfoga
+RUN chmod +x /usr/local/bin/phoneinfoga
 
 WORKDIR /app
 
