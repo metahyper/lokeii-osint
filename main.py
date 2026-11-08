@@ -76,21 +76,37 @@ async def ck_library_of_leaks(query):
 async def pivot_maigret(username):
     out = []
     try:
-        from maigret import search as maigret_search
+        import maigret
         from maigret.sites import MaigretDatabase
+        from pathlib import Path
         
-        # Пытаемся загрузить базу из стандартного места, куда её ставит pip
-        try:
-            db = MaigretDatabase().load_from_path("maigret/resources/data.json")
-        except FileNotFoundError:
-            print("[maigret] data.json not found, trying default")
-            # Если файла нет, используем встроенную базу
-            from maigret import MaigretDatabase as DefaultDB
-            db = DefaultDB()
+        # Находим, где pip установил пакет maigret
+        maigret_pkg_dir = Path(maigret.__file__).resolve().parent
+        db_path = maigret_pkg_dir / "resources" / "data.json"
+        
+        print(f"[maigret] looking for db at: {db_path}")
+        
+        if not db_path.is_file():
+            print(f"[maigret] CRITICAL: data.json not found at {db_path}")
+            # Последняя попытка: скачать с GitHub
+            db_url = "https://raw.githubusercontent.com/soxoj/maigret/main/maigret/resources/data.json"
+            async with httpx.AsyncClient(timeout=30) as client:
+                r = await client.get(db_url)
+                if r.status_code == 200:
+                    tmp_db = tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False, encoding='utf-8')
+                    tmp_db.write(r.text)
+                    tmp_db.close()
+                    db = MaigretDatabase().load_from_path(tmp_db.name)
+                    os.unlink(tmp_db.name)
+                else:
+                    print(f"[maigret] download failed: {r.status_code}")
+                    return out
+        else:
+            db = MaigretDatabase().load_from_path(str(db_path))
         
         sites = db.ranked_sites_dict(top=50)
         
-        results = await maigret_search(
+        results = await maigret.search(
             username=username,
             site_dict=sites,
             logger=logging.getLogger("maigret"),
