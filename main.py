@@ -1,5 +1,5 @@
 # language: Python 3.11+, file: main.py
-# Lokeii OSINT — PhoneInfoga + WhatsMyName (native) + Sherlock
+# Lokeii OSINT — PhoneInfoga + Sherlock (стабильная версия)
 import asyncio, html, json, os, re, subprocess, tempfile, logging
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -14,7 +14,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 logging.basicConfig(level=logging.INFO)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-MAX_DEPTH = 4
+MAX_DEPTH = 3
 TIMEOUT = 20.0
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 
@@ -57,80 +57,28 @@ async def ck_phoneinfoga(phone):
         print(f"[phoneinfoga] error: {e}")
     return out
 
-# ---------------- WHATS-MY-NAME (нативный парсинг) ----------------
-
-async def pivot_wmn(username):
-    out = []
-    wmn_file = Path("wmn-data.json")
-    if not wmn_file.is_file():
-        return [Pivot("ОШИБКА", "wmn-data.json не найден", "wmn", 1.0)]
-    
-    try:
-        with open(wmn_file, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except Exception as e:
-        return [Pivot("ОШИБКА", f"Ошибка чтения JSON: {e}", "wmn", 1.0)]
-
-    sites = data.get("sites", [])
-    if not sites:
-        return [Pivot("ОШИБКА", "В файле нет поля 'sites'", "wmn", 1.0)]
-
-    async def check_site(client, site):
-        url_template = site.get("uri_check", "")
-        if not url_template: return None
-        url = url_template.replace("{account}", username)
-        
-        try:
-            r = await client.get(url, timeout=8.0)
-            e_code = site.get("e_code", 200)
-            m_string = site.get("m_string", "")
-            e_string = site.get("e_string", "")
-            
-            # Логика проверки WhatsMyName
-            if r.status_code == e_code:
-                if e_string and e_string in r.text:
-                    return None # Не найден
-                if m_string and m_string in r.text:
-                    return Pivot("профиль", url, f"wmn/{site.get('name', '?')}", .6)
-                elif not m_string and not e_string:
-                    return Pivot("профиль", url, f"wmn/{site.get('name', '?')}", .5)
-        except Exception:
-            pass
-        return None
-
-    # Ограничиваем количество одновременных запросов, чтобы не забанили
-    sem = asyncio.Semaphore(15)
-    async with httpx.AsyncClient(headers={"User-Agent": UA}, follow_redirects=True) as client:
-        async def bounded_check(site):
-            async with sem:
-                return await check_site(client, site)
-        
-        # Берем первые 100 сайтов для скорости (или все, если хочешь ждать дольше)
-        results = await asyncio.gather(*(bounded_check(s) for s in sites[:150]))
-        for res in results:
-            if res: out.append(res)
-
-    if not out:
-        return [Pivot("ИНФО", f"WhatsMyName: 0 результатов", "wmn", 0.5)]
-    return out
-
-# ---------------- SHERLOCK ----------------
+# ---------------- SHERLOCK (стабильный) ----------------
 
 async def pivot_sherlock(username):
     out = []
     tmp = tempfile.NamedTemporaryFile(suffix=".json", delete=False); tmp.close()
     try:
+        # Убираем сломанные сайты
+        BROKEN = {"LinkedIn", "ChaturBate", "Pinterest", "Instagram"}
         r = await asyncio.to_thread(
             subprocess.run,
             ["sherlock", username, "--print-found", "--no-color", "--timeout", "5", "--json", tmp.name],
-            capture_output=True, text=True, timeout=45,
+            capture_output=True, text=True, timeout=60,
         )
         if r.returncode == 0 and os.path.exists(tmp.name) and os.path.getsize(tmp.name) > 0:
             with open(tmp.name) as f:
                 data = json.load(f)
             for name, info in data.items():
+                if name in BROKEN: continue
                 if isinstance(info, dict) and info.get("status", {}).get("status") == "Claimed":
                     out.append(Pivot("профиль", info.get("url_main", ""), f"sherlock/{name}", .5))
+        if not out:
+            print(f"[sherlock] 0 results. stderr: {r.stderr[:200]}")
     except Exception as e:
         print(f"[sherlock] error: {e}")
     finally:
@@ -190,7 +138,7 @@ async def run_scan(target: str, kind: str) -> ScanState:
             if isinstance(b, list):
                 for p in b: st.add(p)
     elif kind == "username":
-        for b in await asyncio.gather(pivot_wmn(target), pivot_sherlock(target), return_exceptions=True):
+        for b in await asyncio.gather(pivot_sherlock(target), return_exceptions=True):
             if isinstance(b, list):
                 for p in b: st.add(p)
 
@@ -205,7 +153,7 @@ async def run_scan(target: str, kind: str) -> ScanState:
             if s.kind in ("ник","профиль"):
                 m = re.search(r"/([A-Za-z0-9_.]+)/?$", s.value)
                 u = m.group(1) if m else s.value
-                t = [pivot_wmn(u), pivot_sherlock(u)]
+                t = [pivot_sherlock(u)]
             elif s.kind == "имя":
                 t = [pivot_ddg(s.value)]
             elif s.kind == "email":
