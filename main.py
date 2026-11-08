@@ -76,26 +76,32 @@ async def ck_library_of_leaks(query):
 async def pivot_maigret(username):
     out = []
     try:
-        import maigret
+        from maigret import search as maigret_search
         from maigret.sites import MaigretDatabase
         
-        # Загружаем базу сайтов.
-        db = MaigretDatabase().load_from_path("maigret/resources/data.json")
+        # Пытаемся загрузить базу из стандартного места, куда её ставит pip
+        try:
+            db = MaigretDatabase().load_from_path("maigret/resources/data.json")
+        except FileNotFoundError:
+            print("[maigret] data.json not found, trying default")
+            # Если файла нет, используем встроенную базу
+            from maigret import MaigretDatabase as DefaultDB
+            db = DefaultDB()
+        
         sites = db.ranked_sites_dict(top=50)
         
-        # Вызываем напрямую, так как мы уже в асинхронной функции
-        results = await maigret.search(
+        results = await maigret_search(
             username=username,
             site_dict=sites,
-            timeout=15,
             logger=logging.getLogger("maigret"),
+            timeout=15,
+            is_parsing_enabled=False,
             id_type='username',
         )
         
-        for site_name, info in results.items():
-            # Проверяем статус через QueryStatus
-            if info.get('status') and info['status'].status.name == 'CLAIMED':
-                url = info.get('url_user', '')
+        for site_name, result in results.items():
+            if result.get("status") and result["status"].is_found():
+                url = result.get("url_user", "")
                 if url:
                     out.append(Pivot("профиль", url, f"maigret/{site_name}", .7))
         
