@@ -1,7 +1,8 @@
 # language: Python 3.11+, file: main.py
-# Lokeii OSINT — PhoneInfoga + Naminter + Sherlock
+# Lokeii OSINT — PhoneInfoga + Naminter (local) + Sherlock
 import asyncio, html, json, os, re, subprocess, tempfile, logging
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import httpx
 import phonenumbers
@@ -44,17 +45,14 @@ async def ck_phoneinfoga(phone):
             try:
                 data = json.loads(r.stdout)
                 if isinstance(data, dict):
-                    # PhoneInfoga возвращает структуру с полями
                     if data.get("carrier"):
                         out.append(Pivot("оператор", str(data["carrier"]), "phoneinfoga", .8))
                     if data.get("country"):
                         out.append(Pivot("регион", str(data["country"]), "phoneinfoga", .9))
-                    # Генерируем ссылки для ручного поиска
                     for link in data.get("footprint", [])[:5]:
                         if isinstance(link, str):
                             out.append(Pivot("ссылка", link, "phoneinfoga", .3))
             except json.JSONDecodeError:
-                # Если JSON не распарсился, парсим вывод построчно
                 for line in r.stdout.splitlines():
                     if "Carrier:" in line:
                         out.append(Pivot("оператор", line.split(":")[-1].strip(), "phoneinfoga", .7))
@@ -68,14 +66,22 @@ async def ck_phoneinfoga(phone):
         print(f"[phoneinfoga] error: {e}")
     return out
 
-# ---------------- NAMINTER ----------------
+# ---------------- NAMINTER (с локальным файлом) ----------------
 
 async def pivot_naminter(username):
     out = []
     try:
         from naminter import Naminter
+        
+        wmn_file = Path("wmn-data.json")
+        if not wmn_file.is_file():
+            print(f"[naminter] CRITICAL: {wmn_file} not found in {os.getcwd()}")
+            return out
+        
         async with Naminter() as naminter:
-            await naminter.fetch_remote_list()
+            # Загружаем локальный файл вместо скачивания
+            await naminter.fetch_remote_list(file_path=str(wmn_file))
+            
             results = await naminter.check_username(username, max_tasks=20)
             for res in results:
                 if res.check_status == 'found' and res.site_url:
@@ -88,7 +94,7 @@ async def pivot_naminter(username):
         print(f"[naminter] error: {repr(e)}")
     return out
 
-# ---------------- SHERLOCK (третий слой) ----------------
+# ---------------- SHERLOCK ----------------
 
 async def pivot_sherlock(username):
     out = []
