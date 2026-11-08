@@ -1,5 +1,5 @@
 # language: Python 3.11+, file: main.py
-# Lokeii OSINT — PhoneInfoga + Naminter (enumerate) + Sherlock
+# Lokeii OSINT — PhoneInfoga + WhatsMyName (native) + Sherlock
 import asyncio, html, json, os, re, subprocess, tempfile, logging
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -49,52 +49,69 @@ async def ck_phoneinfoga(phone):
                         out.append(Pivot("оператор", str(data["carrier"]), "phoneinfoga", .8))
                     if data.get("country"):
                         out.append(Pivot("регион", str(data["country"]), "phoneinfoga", .9))
-                    for link in data.get("footprint", [])[:5]:
-                        if isinstance(link, str):
-                            out.append(Pivot("ссылка", link, "phoneinfoga", .3))
             except json.JSONDecodeError:
-                for line in r.stdout.splitlines():
-                    if "Carrier:" in line:
-                        out.append(Pivot("оператор", line.split(":")[-1].strip(), "phoneinfoga", .7))
-                    elif "Country:" in line:
-                        out.append(Pivot("регион", line.split(":")[-1].strip(), "phoneinfoga", .8))
-        elif r.stderr:
-            print(f"[phoneinfoga] stderr: {r.stderr[:200]}")
+                pass
     except FileNotFoundError:
-        print("[phoneinfoga] binary not found. Check Dockerfile.")
+        print("[phoneinfoga] binary not found.")
     except Exception as e:
         print(f"[phoneinfoga] error: {e}")
     return out
 
-# ---------------- NAMINTER (исправленный метод) ----------------
+# ---------------- WHATS-MY-NAME (нативный парсинг) ----------------
 
-async def pivot_naminter(username):
+async def pivot_wmn(username):
     out = []
+    wmn_file = Path("wmn-data.json")
+    if not wmn_file.is_file():
+        return [Pivot("ОШИБКА", "wmn-data.json не найден", "wmn", 1.0)]
+    
     try:
-        from naminter import Naminter
-        from naminter.core.network import CurlCFFISession
-        
-        wmn_file = Path("wmn-data.json")
-        if not wmn_file.is_file():
-            return [Pivot("ОШИБКА", "wmn-data.json не найден", "naminter", 1.0)]
-        
         with open(wmn_file, "r", encoding="utf-8") as f:
-            wmn_data = json.load(f)
-        
-        http_client = CurlCFFISession(timeout=10)
-        
-        async with Naminter(http_client=http_client, data=wmn_data) as naminter:
-            # Правильный метод в актуальной версии
-            async for res in naminter.enumerate_usernames([username]):
-                if res.check_status == 'found' and res.site_url:
-                    out.append(Pivot("профиль", res.site_url, f"naminter/{res.site_name}", .7))
-        
-        if not out:
-            return [Pivot("ИНФО", f"Naminter: 0 результатов для {username}", "naminter", 0.5)]
-    except ImportError as e:
-        return [Pivot("ОШИБКА", f"Naminter не установлен: {e}", "naminter", 1.0)]
+            data = json.load(f)
     except Exception as e:
-        return [Pivot("ОШИБКА", f"Naminter упал: {repr(e)[:100]}", "naminter", 1.0)]
+        return [Pivot("ОШИБКА", f"Ошибка чтения JSON: {e}", "wmn", 1.0)]
+
+    sites = data.get("sites", [])
+    if not sites:
+        return [Pivot("ОШИБКА", "В файле нет поля 'sites'", "wmn", 1.0)]
+
+    async def check_site(client, site):
+        url_template = site.get("uri_check", "")
+        if not url_template: return None
+        url = url_template.replace("{account}", username)
+        
+        try:
+            r = await client.get(url, timeout=8.0)
+            e_code = site.get("e_code", 200)
+            m_string = site.get("m_string", "")
+            e_string = site.get("e_string", "")
+            
+            # Логика проверки WhatsMyName
+            if r.status_code == e_code:
+                if e_string and e_string in r.text:
+                    return None # Не найден
+                if m_string and m_string in r.text:
+                    return Pivot("профиль", url, f"wmn/{site.get('name', '?')}", .6)
+                elif not m_string and not e_string:
+                    return Pivot("профиль", url, f"wmn/{site.get('name', '?')}", .5)
+        except Exception:
+            pass
+        return None
+
+    # Ограничиваем количество одновременных запросов, чтобы не забанили
+    sem = asyncio.Semaphore(15)
+    async with httpx.AsyncClient(headers={"User-Agent": UA}, follow_redirects=True) as client:
+        async def bounded_check(site):
+            async with sem:
+                return await check_site(client, site)
+        
+        # Берем первые 100 сайтов для скорости (или все, если хочешь ждать дольше)
+        results = await asyncio.gather(*(bounded_check(s) for s in sites[:150]))
+        for res in results:
+            if res: out.append(res)
+
+    if not out:
+        return [Pivot("ИНФО", f"WhatsMyName: 0 результатов", "wmn", 0.5)]
     return out
 
 # ---------------- SHERLOCK ----------------
@@ -173,7 +190,7 @@ async def run_scan(target: str, kind: str) -> ScanState:
             if isinstance(b, list):
                 for p in b: st.add(p)
     elif kind == "username":
-        for b in await asyncio.gather(pivot_naminter(target), pivot_sherlock(target), return_exceptions=True):
+        for b in await asyncio.gather(pivot_wmn(target), pivot_sherlock(target), return_exceptions=True):
             if isinstance(b, list):
                 for p in b: st.add(p)
 
@@ -188,7 +205,7 @@ async def run_scan(target: str, kind: str) -> ScanState:
             if s.kind in ("ник","профиль"):
                 m = re.search(r"/([A-Za-z0-9_.]+)/?$", s.value)
                 u = m.group(1) if m else s.value
-                t = [pivot_naminter(u), pivot_sherlock(u)]
+                t = [pivot_wmn(u), pivot_sherlock(u)]
             elif s.kind == "имя":
                 t = [pivot_ddg(s.value)]
             elif s.kind == "email":
