@@ -66,18 +66,23 @@ async def ck_phoneinfoga(phone):
         print(f"[phoneinfoga] error: {e}")
     return out
 
-# ---------------- NAMINTER (с локальным файлом и выводом ошибок) ----------------
+# ---------------- NAMINTER (с передачей клиента) ----------------
 
 async def pivot_naminter(username):
     out = []
     try:
         from naminter import Naminter
+        from naminter.core.network import CurlCFFISession
+        from pathlib import Path
         
         wmn_file = Path("wmn-data.json")
         if not wmn_file.is_file():
             return [Pivot("ОШИБКА", "wmn-data.json не найден", "naminter", 1.0)]
         
-        async with Naminter() as naminter:
+        # Создаём HTTP-клиент, который требует новая версия Naminter
+        http_client = CurlCFFISession(timeout=10)
+        
+        async with Naminter(http_client=http_client) as naminter:
             await naminter.fetch_remote_list(file_path=str(wmn_file))
             results = await naminter.check_username(username, max_tasks=20)
             for res in results:
@@ -213,7 +218,6 @@ def _report(st: ScanState, kind: str) -> list[str]:
             lines.append(f"    <i>· {html.escape(p.source)}</i>")
     lines.append("<b>╰" + "─" * (len(st.target) + 14) + "╯</b>")
     
-    # Разбиваем на куски по 3000 символов (лимит Telegram — 4096)
     full_text = "\n".join(lines)
     chunk_size = 3000
     return [full_text[i:i+chunk_size] for i in range(0, len(full_text), chunk_size)]
