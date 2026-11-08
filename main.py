@@ -1,7 +1,7 @@
 # language: Python 3.11+, file: main.py
-# Lokeii OSINT — Wiwok (комбайн) + Sherlock (ники)
-import asyncio, html, json, os, re, subprocess, logging
+import asyncio, html, json, os, re, subprocess, logging, io
 from dataclasses import dataclass, field
+from datetime import datetime
 
 import phonenumbers
 from telegram import Update
@@ -10,7 +10,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 
 logging.basicConfig(level=logging.INFO)
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-WIWOK_DIR = "/app/wiwok"  # Куда Dockerfile клонирует Wiwok
+WIWOK_DIR = "/app/wiwok"
 
 @dataclass
 class Pivot:
@@ -22,57 +22,38 @@ class ScanState:
     def add(self, p: Pivot) -> bool:
         self.pivots.append(p); return True
 
-# ---------------- WIWOK (комбайн) ----------------
+# ---------------- WIWOK ----------------
 
-async def pivot_wiwok(target: str) -> list[Pivot]:
+async def pivot_wiwok(target: str, target_type: str = "phone") -> list[Pivot]:
     out = []
     if not os.path.isdir(WIWOK_DIR):
-        return [Pivot("ОШИБКА", "Wiwok не найден в /app/wiwok", "wiwok", 1.0)]
+        return [Pivot("ОШИБКА", "Wiwok не найден", "wiwok", 1.0)]
     
     try:
-        # Запускаем Wiwok в режиме quick (быстро, без глубоких пивотов)
-        # -q = quiet mode, чтобы не сыпать прогрессом в stdout
+        cmd = ["python3", "wiwok.py", target, "-t", target_type, "-m", "standard", "--no-color"]
         proc = await asyncio.create_subprocess_exec(
-            "python3", "wiwok.py", target, "-m", "quick", "-q", "--no-color",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=WIWOK_DIR
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, cwd=WIWOK_DIR
         )
-        
-        # Жёсткий таймаут: 90 секунд. Если не успел — убиваем.
         try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=90.0)
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120.0)
         except asyncio.TimeoutError:
             proc.kill()
-            return [Pivot("ОШИБКА", "Wiwok: TIMEOUT (90s)", "wiwok", 1.0)]
-        
-        if stderr:
-            print(f"[wiwok] stderr: {stderr.decode(errors='ignore')[:300]}")
+            return [Pivot("ОШИБКА", "Wiwok: TIMEOUT (120s)", "wiwok", 1.0)]
         
         if not stdout:
             return [Pivot("ИНФО", "Wiwok: пустой вывод", "wiwok", 0.5)]
         
-        # Парсим stdout. Wiwok в quiet mode может сохранять результаты в файл,
-        # но также выводит краткую сводку. Ищем ссылки и ключевые слова.
         for line in stdout.decode(errors='ignore').splitlines():
-            # Ссылки на профили
             m = re.search(r"(https?://[^\s]+)", line)
             if m:
                 out.append(Pivot("профиль", m.group(1), "wiwok", .6))
-            # Строки с найденными данными (HIGH/MEDIUM/LOW)
             elif any(tag in line for tag in ("HIGH", "MEDIUM", "LOW", "[+]", "found")):
-                out.append(Pivot("wiwok", line.strip()[:100], "wiwok", .5))
-                
-    except FileNotFoundError:
-        return [Pivot("ОШИБКА", "Wiwok: python3 или wiwok.py не найден", "wiwok", 1.0)]
+                out.append(Pivot("wiwok", line.strip()[:120], "wiwok", .5))
     except Exception as e:
         return [Pivot("ОШИБКА", f"Wiwok: {repr(e)[:80]}", "wiwok", 1.0)]
-    
-    if not out:
-        return [Pivot("ИНФО", "Wiwok: 0 результатов", "wiwok", 0.5)]
     return out
 
-# ---------------- SHERLOCK (ники) ----------------
+# ---------------- SHERLOCK ----------------
 
 async def pivot_sherlock(username: str) -> list[Pivot]:
     out = []
@@ -85,23 +66,19 @@ async def pivot_sherlock(username: str) -> list[Pivot]:
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=60.0)
         except asyncio.TimeoutError:
             proc.kill()
-            print("[sherlock] KILLED after 60s")
-            return out
-        
-        if not stdout:
-            return out
-        
-        for line in stdout.decode(errors='ignore').splitlines():
-            if line.startswith("[+]") and "http" in line:
-                m = re.search(r"(https?://[^\s]+)", line)
-                if m:
-                    site = line.split(":")[0].replace("[+]", "").strip()
-                    out.append(Pivot("профиль", m.group(1), f"sherlock/{site}", .5))
+            return [Pivot("ОШИБКА", "Sherlock: TIMEOUT (60s)", "sherlock", 1.0)]
+        if stdout:
+            for line in stdout.decode(errors='ignore').splitlines():
+                if line.startswith("[+]") and "http" in line:
+                    m = re.search(r"(https?://[^\s]+)", line)
+                    if m:
+                        site = line.split(":")[0].replace("[+]", "").strip()
+                        out.append(Pivot("профиль", m.group(1), f"sherlock/{site}", .5))
     except Exception as e:
-        print(f"[sherlock] error: {e}")
+        return [Pivot("ОШИБКА", f"Sherlock: {repr(e)[:80]}", "sherlock", 1.0)]
     return out
 
-# ---------------- PHONE (phonenumbers как fallback) ----------------
+# ---------------- PHONE ----------------
 
 async def ck_phone(phone: str) -> list[Pivot]:
     out = []
@@ -125,54 +102,79 @@ def detect_type(target: str) -> str:
 
 async def run_scan(target: str, kind: str) -> ScanState:
     st = ScanState(target=target)
-    
     if kind == "phone":
-        # Wiwok + phonenumbers
-        results = await asyncio.gather(
-            pivot_wiwok(target),
-            ck_phone(target),
-            return_exceptions=True
-        )
+        results = await asyncio.gather(pivot_wiwok(target, "phone"), ck_phone(target), return_exceptions=True)
     elif kind == "email":
-        # Wiwok для email
-        results = await asyncio.gather(
-            pivot_wiwok(target),
-            return_exceptions=True
-        )
+        results = await asyncio.gather(pivot_wiwok(target, "email"), return_exceptions=True)
     elif kind == "username":
-        # Sherlock для ников
-        results = await asyncio.gather(
-            pivot_sherlock(target),
-            return_exceptions=True
-        )
+        results = await asyncio.gather(pivot_sherlock(target), return_exceptions=True)
     else:
         results = []
-    
     for b in results:
         if isinstance(b, list):
             for p in b: st.add(p)
     return st
 
-def _report(st: ScanState, kind: str) -> list[str]:
-    lines = [
-        f"<b>╭─ ОТЧЁТ · <code>{html.escape(st.target)}</code> ─╮</b>",
-        f"  тип: <i>{kind}</i> · зацепок: <b>{len(st.pivots)}</b>",
-        "  " + "─" * 28,
-    ]
-    if not st.pivots:
-        lines.append("  <i>пусто</i>")
-    else:
-        for p in st.pivots[:70]:
-            lines.append(f"  <b>{p.kind}</b>")
-            lines.append(f"    <code>{html.escape(p.value)[:100]}</code>")
-            lines.append(f"    <i>· {html.escape(p.source)}</i>")
-    lines.append("<b>╰" + "─" * (len(st.target) + 14) + "╯</b>")
-    
-    text = "\n".join(lines)
-    return [text[i:i+3500] for i in range(0, len(text), 3500)]
+# ---------------- HTML ОТЧЁТ ----------------
+
+def build_html_report(st: ScanState, kind: str) -> str:
+    now = datetime.now().strftime("%d.%m.%Y %H:%M")
+    cards = []
+    for p in st.pivots:
+        icon = "📱" if p.kind == "регион" else "🌐" if p.kind == "профиль" else "🔍"
+        cards.append(f"""
+        <div class="card">
+            <div class="card-header">
+                <span class="badge">{icon} {html.escape(p.kind)}</span>
+                <span class="source">{html.escape(p.source)}</span>
+            </div>
+            <div class="card-body">{html.escape(p.value)}</div>
+        </div>
+        """)
+
+    return f"""<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>Lokeii OSINT — {html.escape(st.target)}</title>
+<style>
+    body {{
+        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        background: #0a0a0f; color: #e0e0e8; margin: 0; padding: 40px;
+    }}
+    .container {{ max-width: 800px; margin: 0 auto; }}
+    h1 {{ color: #7c3aed; font-weight: 300; letter-spacing: 1px; }}
+    .meta {{ color: #6b6b80; font-size: 14px; margin-bottom: 30px; border-bottom: 1px solid #1e1e2e; padding-bottom: 20px; }}
+    .grid {{ display: grid; grid-template-columns: 1fr; gap: 12px; }}
+    .card {{
+        background: #12121a; border: 1px solid #1e1e2e; border-radius: 12px;
+        padding: 16px; transition: border-color 0.2s;
+    }}
+    .card:hover {{ border-color: #7c3aed; }}
+    .card-header {{ display: flex; justify-content: space-between; margin-bottom: 8px; }}
+    .badge {{ background: rgba(124, 58, 237, 0.2); color: #a78bfa; padding: 4px 10px; border-radius: 20px; font-size: 12px; font-weight: 600; text-transform: uppercase; }}
+    .source {{ color: #4b4b60; font-size: 11px; font-family: monospace; }}
+    .card-body {{ font-family: 'Consolas', monospace; font-size: 14px; color: #fff; word-break: break-all; }}
+    .empty {{ color: #6b6b80; font-style: italic; }}
+</style>
+</head>
+<body>
+<div class="container">
+    <h1>👁 Lokeii OSINT</h1>
+    <div class="meta">
+        Target: <strong>{html.escape(st.target)}</strong> | Type: {kind} | Date: {now} | Pivots: {len(st.pivots)}
+    </div>
+    <div class="grid">
+        {''.join(cards) if cards else '<div class="empty">Ничего не найдено.</div>'}
+    </div>
+</div>
+</body>
+</html>"""
+
+# ---------------- TELEGRAM ----------------
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👁 <b>Lokeii OSINT</b>\n\nТелефон, email или username:", parse_mode=ParseMode.HTML)
+    await update.message.reply_text("👁 Lokeii OSINT\n\nТелефон, email или username:")
 
 async def on_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     target = update.message.text.strip()
@@ -180,21 +182,25 @@ async def on_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if kind == "unknown":
         return await update.message.reply_text("Не распознал.")
     
-    msg = await update.message.reply_text(f"<b>СКАНИРУЮ ⠋</b>\n<code>{html.escape(target)}</code>", parse_mode=ParseMode.HTML)
+    msg = await update.message.reply_text(f"Сканирую {target}...")
     
     try:
         st = await run_scan(target, kind)
     except Exception as e:
-        await msg.edit_text(f"Ошибка: <code>{html.escape(str(e))}</code>", parse_mode=ParseMode.HTML)
+        await msg.edit_text(f"Ошибка сканирования: {e}")
         return
     
+    # Собираем HTML
+    html_content = build_html_report(st, kind)
+    
+    # Отправляем как файл
     try:
-        chunks = _report(st, kind)
-        await msg.edit_text(chunks[0], parse_mode=ParseMode.HTML, disable_web_page_preview=True)
-        for chunk in chunks[1:]:
-            await msg.reply_text(chunk, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+        file = io.BytesIO(html_content.encode('utf-8'))
+        file.name = f"report_{target.replace('+', '').replace('@', '_')}.html"
+        await update.message.reply_document(document=file, filename=file.name)
+        await msg.edit_text(f"✅ Сканирование завершено. Найдено зацепок: {len(st.pivots)}")
     except Exception as e:
-        print(f"[report] error: {e}")
+        await msg.edit_text(f"Ошибка отправки файла: {e}")
 
 def main():
     if not BOT_TOKEN: raise SystemExit(1)
