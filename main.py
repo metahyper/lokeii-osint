@@ -1,6 +1,6 @@
-﻿# language: Python 3.11+, file: main.py
+# language: Python 3.11+, file: main.py
 # Lokeii OSINT — Telegram-only bot. Без веба, без локалхоста.
-import asyncio, html, json, os, re, subprocess, tempfile
+import asyncio, html, json, os, re, subprocess, tempfile, logging
 from dataclasses import dataclass, field
 
 import httpx
@@ -73,50 +73,69 @@ async def ck_library_of_leaks(query):
 async def pivot_maigret(username):
     out = []
     try:
-        r = await asyncio.to_thread(
-            subprocess.run,
-            ["maigret", username, "--top-sites", "50", "--json", "ndjson", 
-             "--no-progressbar", "--no-recursion", "--timeout", "10", "--no-color"],
-            capture_output=True, text=True, timeout=120,
-        )
-        
-        if r.stdout:
-            for line in r.stdout.strip().split("\n"):
-                try:
-                    data = json.loads(line)
-                    if "sites" in data:
-                        for site in data["sites"][:20]:
-                            if site.get("status") == "Claimed" and site.get("url"):
-                                out.append(Pivot("профиль", site["url"], f"maigret/{site.get('name','?')}", .7))
-                except json.JSONDecodeError:
-                    pass
-        
+        # Используем асинхронную обертку для вызова Maigret API в отдельном потоке
+        def run_maigret():
+            try:
+                from maigret.maigret import search
+                from maigret.sites import MaigretDatabase
+                import logging
+                
+                # Загружаем базу сайтов
+                db = MaigretDatabase().load_from_path("maigret/resources/data.json")
+                sites = db.ranked_sites_dict(top=50)
+                
+                # Запускаем поиск
+                results = asyncio.run(search(
+                    username=username,
+                    site_dict=sites,
+                    logger=logging.getLogger("maigret"),
+                    timeout=10,
+                    is_parsing_enabled=False,
+                ))
+                
+                res_list = []
+                for site_name, result in results.items():
+                    if result.get("status") and result["status"].is_found():
+                        url = result.get("url_user", "")
+                        if url:
+                            res_list.append(Pivot("профиль", url, f"maigret/{site_name}", .7))
+                return res_list
+            except Exception as e:
+                print(f"[maigret] inner error: {e}")
+                return []
+
+        out = await asyncio.to_thread(run_maigret)
         if not out:
-            print(f"[maigret] empty output. stderr: {r.stderr[:300]}")
+            print(f"[maigret] API returned 0 results for {username}")
             
     except Exception as e:
-        print(f"[maigret] error: {e}")
+        print(f"[maigret] outer error: {e}")
     return out
 
 async def pivot_sherlock_filtered(username):
     out = []
     BROKEN = {"LinkedIn", "ChaturBate", "Pinterest", "Instagram"}
+    tmp = tempfile.NamedTemporaryFile(suffix=".json", delete=False); tmp.close()
     try:
         r = await asyncio.to_thread(
             subprocess.run,
-            ["sherlock", username, "--print-found", "--no-color", "--timeout", "5", "--json"],
+            ["sherlock", username, "--print-found", "--no-color", "--timeout", "5", "--json", tmp.name],
             capture_output=True, text=True, timeout=60,
         )
-        if r.returncode == 0 and r.stdout:
-            data = json.loads(r.stdout)
+        if r.returncode == 0 and os.path.exists(tmp.name) and os.path.getsize(tmp.name) > 0:
+            with open(tmp.name) as f:
+                data = json.load(f)
             for name, info in data.items():
                 if name in BROKEN: continue
                 if isinstance(info, dict) and info.get("status", {}).get("status") == "Claimed":
                     out.append(Pivot("профиль", info.get("url_main", ""), f"sherlock/{name}", .5))
         if not out:
-            print(f"[sherlock] empty. stderr: {r.stderr[:300]}")
+            print(f"[sherlock] 0 results. stderr: {r.stderr[:200]}")
     except Exception as e:
         print(f"[sherlock] error: {e}")
+    finally:
+        try: os.unlink(tmp.name)
+        except OSError: pass
     return out
 
 async def pivot_blackbird(username):
