@@ -1,4 +1,4 @@
-﻿# language: Python 3.11+, file: main.py
+# language: Python 3.11+, file: main.py
 # Lokeii OSINT — Telegram-only bot. Без веба, без локалхоста.
 import asyncio, html, json, os, re, subprocess, tempfile
 from dataclasses import dataclass, field
@@ -75,16 +75,28 @@ async def pivot_maigret(username):
     try:
         r = await asyncio.to_thread(
             subprocess.run,
-            ["maigret", username, "--json", "simple", "--no-progressbar",
-             "--no-recursion", "--timeout", "60", "-n", "20"],
+            ["maigret", username, "--top-sites", "50", "--json", "ndjson", 
+             "--no-progressbar", "--no-recursion", "--timeout", "10", "--no-color"],
             capture_output=True, text=True, timeout=120,
         )
-        if r.returncode == 0 and r.stdout:
-            data = json.loads(r.stdout)
-            for site in data.get("sites", [])[:20]:
-                if site.get("url") and site.get("status") == "Claimed":
-                    out.append(Pivot("профиль", site["url"], f"maigret/{site.get('name','?')}", .7))
-    except Exception: pass
+        
+        # Пытаемся распарсить NDJSON или обычный JSON
+        if r.stdout:
+            for line in r.stdout.strip().split("\n"):
+                try:
+                    data = json.loads(line)
+                    if "sites" in data:
+                        for site in data["sites"][:20]:
+                            if site.get("status") == "Claimed" and site.get("url"):
+                                out.append(Pivot("профиль", site["url"], f"maigret/{site.get('name','?')}", .7))
+                except json.JSONDecodeError:
+                    pass
+        
+        if not out:
+            print(f"[maigret] empty output. stderr: {r.stderr[:300]}")
+            
+    except Exception as e:
+        print(f"[maigret] error: {e}")
     return out
 
 async def pivot_sherlock_filtered(username):
@@ -93,7 +105,7 @@ async def pivot_sherlock_filtered(username):
     try:
         r = await asyncio.to_thread(
             subprocess.run,
-            ["sherlock", username, "--print-found", "--no-color", "--timeout", "15", "--json"],
+            ["sherlock", username, "--print-found", "--no-color", "--timeout", "5", "--json"],
             capture_output=True, text=True, timeout=60,
         )
         if r.returncode == 0 and r.stdout:
@@ -102,7 +114,10 @@ async def pivot_sherlock_filtered(username):
                 if name in BROKEN: continue
                 if isinstance(info, dict) and info.get("status", {}).get("status") == "Claimed":
                     out.append(Pivot("профиль", info.get("url_main", ""), f"sherlock/{name}", .5))
-    except Exception: pass
+        if not out:
+            print(f"[sherlock] empty. stderr: {r.stderr[:300]}")
+    except Exception as e:
+        print(f"[sherlock] error: {e}")
     return out
 
 async def pivot_blackbird(username):
@@ -123,7 +138,8 @@ async def pivot_blackbird(username):
             for site in sites:
                 if isinstance(site, dict) and site.get("url"):
                     out.append(Pivot("профиль", site["url"], f"blackbird/{site.get('name','?')}", .6))
-    except Exception: pass
+    except Exception as e:
+        print(f"[blackbird] error: {e}")
     finally:
         try: os.unlink(tmp.name)
         except OSError: pass
